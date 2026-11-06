@@ -6,6 +6,7 @@
   "packageManager": "npm@10.8.0",
   "scripts": {
     "dev": "tsx server.ts",
+    "install": "npm install --force",
     "build": "vite build",
     "start": "tsx server.ts",
     "preview": "vite preview",

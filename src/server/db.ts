@@ -16,7 +16,11 @@ export const APP_CONFIG = {
   cashfreeAppId: process.env.CASHFREE_APP_ID || '1494190b594e98ed762a2a943320914941',
   cashfreeSecretKey: process.env.CASHFREE_SECRET_KEY || 'cfsk_ma_prod_979295dd86c34ea7eef3d56c1e07d25e_27097462',
   cashfreeEnv: process.env.CASHFREE_ENVIRONMENT || 'PROD',
+  cashfreeApiUrl: (process.env.CASHFREE_ENVIRONMENT || 'PROD') === 'SANDBOX' 
+    ? 'https://sandbox.cashfree.com/pg' 
+    : 'https://api.cashfree.com/pg',
   oneSignalAppId: process.env.ONESIGNAL_APP_ID || '561bd59e-8355-47c8-88cc-0766688a105a',
+  oneSignalApiKey: process.env.ONESIGNAL_API_KEY || 'os_v2_app_kyn5lhudkvd4rcgma5tgrcqqlk3p4m4t5ybe45zfmbcgueakfolptqrqiewnrmp67mi4pxk5whye36b55sm47l7qmqtdbv2uffjsay',
   adminUpiId: process.env.ADMIN_UPI_ID || '9878385810@upi',
   supportWhatsapp: process.env.SUPPORT_WHATSAPP || '+919878385810',
   masterAdminUser: process.env.MASTER_ADMIN_USER || 'anonymous.349',

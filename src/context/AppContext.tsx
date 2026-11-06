@@ -44,6 +44,7 @@ interface AppContextType {
 
   // Actions
   handleDeposit: (amount: number, upiRef: string, method: string) => { success: boolean; error?: string };
+  handleCashfreeDepositSuccess: (amount: number, newBalance: number, orderId: string) => void;
   handleWithdrawal: (amount: number, upiOrBank: string, method: string) => { success: boolean; error?: string };
   handleJoinTournament: (tournamentId: string) => { success: boolean; error?: string };
   handleJoinPrivateMatch: (code: string) => { success: boolean; error?: string; tournament?: Tournament };
@@ -298,6 +299,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     addToast('Deposit Successful!', `₹${amount.toFixed(2)} added to your Current Balance.`, 'success');
     setIsDepositModalOpen(false);
     return { success: true };
+  };
+
+  // Cashfree Instant Deposit Success Handler
+  const handleCashfreeDepositSuccess = (amount: number, newBalance: number, orderId: string) => {
+    setUser((prev) => ({
+      ...prev,
+      currentBalance: newBalance,
+    }));
+
+    const newTx: Transaction = {
+      id: `tx_${Date.now()}`,
+      userId: user.id,
+      type: 'deposit',
+      amount,
+      status: 'completed',
+      date: 'Just now',
+      description: `Instant Cashfree Deposit (${orderId})`,
+      refId: orderId,
+      paymentMethod: 'CASHFREE',
+    };
+
+    setTransactions((prev) => [newTx, ...prev]);
+
+    try {
+      confetti({
+        particleCount: 80,
+        spread: 80,
+        origin: { y: 0.6 },
+      });
+    } catch {
+      // Confetti failover
+    }
+
+    addToast('Deposit Successful!', `₹${amount.toFixed(2)} instantly credited to your wallet via Cashfree.`, 'success');
+    setIsDepositModalOpen(false);
   };
 
   // Withdrawal handler
@@ -636,6 +672,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         storeItems,
         leaderboard,
         handleDeposit,
+        handleCashfreeDepositSuccess,
         handleWithdrawal,
         handleJoinTournament,
         handleJoinPrivateMatch,

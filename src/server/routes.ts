@@ -481,7 +481,370 @@ apiRouter.get('/leaderboard', async (_req: Request, res: Response) => {
   }
 });
 
-// App Config / Info
+// ---------------------------------------------------------------------
+// 5. CASHFREE PAYMENT GATEWAY (INSTANT DEPOSIT)
+// ---------------------------------------------------------------------
+
+// Create Cashfree PG Order
+apiRouter.post('/cashfree/create-order', async (req: Request, res: Response) => {
+  const { amount, userId, customerName, customerPhone, customerEmail } = req.body;
+  const numAmount = parseFloat(amount);
+
+  if (isNaN(numAmount) || numAmount < 10) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Minimum deposit amount for Instant Cashfree Deposit is ₹10.00' 
+    });
+  }
+
+  const uid = Number(userId) || 1;
+  const orderId = `order_${Date.now()}_${uid}`;
+  const phone = (customerPhone && String(customerPhone).trim().length === 10) 
+    ? String(customerPhone).trim() 
+    : '9878385810';
+  const email = customerEmail || `player${uid}@beastzbattle.com`;
+  const name = customerName || 'BeastzPlayer';
+
+  try {
+    const db = getDbPool();
+
+    // Prepare Cashfree API payload (Cashfree Production strictly requires https:// URL)
+    let host = req.get('host') || 'beastzbattle2.vercel.app';
+    if (host.includes('localhost') || host.includes('127.0.0.1')) {
+      host = 'beastzbattle2.vercel.app';
+    }
+    const returnUrl = `https://${host}/?tab=me&cf_order_id=${orderId}&status={order_status}`;
+
+    const cfPayload = {
+      order_id: orderId,
+      order_amount: numAmount,
+      order_currency: 'INR',
+      customer_details: {
+        customer_id: `cust_${uid}`,
+        customer_name: name,
+        customer_email: email,
+        customer_phone: phone,
+      },
+      order_meta: {
+        return_url: returnUrl,
+      },
+      order_note: `BEASTz BATTLE Instant Wallet Deposit ₹${numAmount.toFixed(2)}`
+    };
+
+    const response = await fetch(`${APP_CONFIG.cashfreeApiUrl}/orders`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-version': '2023-08-01',
+        'x-client-id': APP_CONFIG.cashfreeAppId,
+        'x-client-secret': APP_CONFIG.cashfreeSecretKey,
+      },
+      body: JSON.stringify(cfPayload),
+    });
+
+    const cfData: any = await response.json();
+
+    if (!response.ok || !cfData.payment_session_id) {
+      console.error('[Cashfree] Order creation error:', cfData);
+      return res.status(response.status || 500).json({
+        success: false,
+        error: cfData.message || 'Unable to create payment session with Cashfree. Please retry or use UPI QR.',
+        raw: cfData,
+      });
+    }
+
+    // Save order in cashfree_orders table in TiDB
+    await db.query(`
+      INSERT INTO cashfree_orders (order_id, user_id, amount, currency, payment_session_id, status)
+      VALUES (?, ?, ?, 'INR', ?, 'PENDING')
+      ON DUPLICATE KEY UPDATE payment_session_id = VALUES(payment_session_id), status = 'PENDING'
+    `, [orderId, uid, numAmount, cfData.payment_session_id]);
+
+    res.json({
+      success: true,
+      orderId: orderId,
+      cfOrderId: cfData.cf_order_id,
+      paymentSessionId: cfData.payment_session_id,
+      environment: APP_CONFIG.cashfreeEnv,
+      amount: numAmount,
+      checkoutUrl: `https://payments.cashfree.com/order/#${cfData.payment_session_id}`,
+      message: 'Payment session created successfully!',
+    });
+  } catch (err) {
+    console.error('[Cashfree] Exception during order creation:', err);
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// Verify Cashfree PG Order Status & Credit Wallet Atomically
+apiRouter.post('/cashfree/verify-order', async (req: Request, res: Response) => {
+  const { orderId, userId } = req.body;
+
+  if (!orderId) {
+    return res.status(400).json({ success: false, error: 'Order ID is required' });
+  }
+
+  try {
+    const db = getDbPool();
+
+    // Query Cashfree API directly for definitive server-side payment state
+    const response = await fetch(`${APP_CONFIG.cashfreeApiUrl}/orders/${encodeURIComponent(orderId)}`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-version': '2023-08-01',
+        'x-client-id': APP_CONFIG.cashfreeAppId,
+        'x-client-secret': APP_CONFIG.cashfreeSecretKey,
+      },
+    });
+
+    const cfOrder: any = await response.json();
+
+    if (!response.ok) {
+      return res.status(response.status || 400).json({
+        success: false,
+        error: cfOrder.message || 'Failed to verify order status with Cashfree.',
+      });
+    }
+
+    const orderStatus = cfOrder.order_status;
+    const paidAmount = parseFloat(cfOrder.order_amount) || 0;
+    const cfPaymentId = cfOrder.cf_order_id || orderId;
+
+    if (orderStatus === 'PAID') {
+      // Check existing status in database to prevent double credit
+      const [orderRows] = await db.query<mysql.RowDataPacket[]>(
+        'SELECT id, status, user_id, amount FROM cashfree_orders WHERE order_id = ?',
+        [orderId]
+      );
+
+      const targetUserId = orderRows.length > 0 ? Number(orderRows[0].user_id) : (Number(userId) || 1);
+
+      if (orderRows.length > 0 && orderRows[0].status === 'PAID') {
+        const [uRows] = await db.query<mysql.RowDataPacket[]>(
+          'SELECT wallet_balance FROM users WHERE id = ?',
+          [targetUserId]
+        );
+        return res.json({
+          success: true,
+          status: 'PAID',
+          alreadyCredited: true,
+          amount: paidAmount,
+          newBalance: uRows.length > 0 ? Number(uRows[0].wallet_balance) : 0,
+          message: 'Payment already verified and credited to your wallet!',
+        });
+      }
+
+      // Execute Atomic Credit
+      await db.query('UPDATE cashfree_orders SET status = "PAID" WHERE order_id = ?', [orderId]);
+      await db.query('UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?', [paidAmount, targetUserId]);
+
+      // Record in transactions ledger
+      await db.query(`
+        INSERT INTO transactions (user_id, amount, type, status, description, created_at)
+        VALUES (?, ?, 'credit', 'SUCCESS', ?, NOW())
+      `, [targetUserId, paidAmount, `Instant Cashfree Deposit (${orderId})`]);
+
+      // Record in deposits table
+      await db.query(`
+        INSERT INTO deposits (user_id, order_id, amount, method, status, reference_id, created_at)
+        VALUES (?, ?, ?, 'Cashfree PG', 'SUCCESS', ?, NOW())
+      `, [targetUserId, orderId, paidAmount, cfPaymentId]);
+
+      // Get updated balance
+      const [uRows] = await db.query<mysql.RowDataPacket[]>(
+        'SELECT wallet_balance FROM users WHERE id = ?',
+        [targetUserId]
+      );
+      const newBalance = uRows.length > 0 ? Number(uRows[0].wallet_balance) : paidAmount;
+
+      return res.json({
+        success: true,
+        status: 'PAID',
+        amount: paidAmount,
+        newBalance: newBalance,
+        cfPaymentId: cfPaymentId,
+        message: `₹${paidAmount.toFixed(2)} successfully credited to your BEASTzBATTLE wallet!`,
+      });
+    } else if (orderStatus === 'ACTIVE') {
+      return res.json({
+        success: false,
+        status: 'ACTIVE',
+        message: 'Payment session is active or pending completion in UPI / Bank app.',
+      });
+    } else {
+      await db.query('UPDATE cashfree_orders SET status = "FAILED" WHERE order_id = ?', [orderId]);
+      return res.json({
+        success: false,
+        status: orderStatus,
+        message: `Payment status: ${orderStatus}. If amount was deducted, it will automatically reflect shortly.`,
+      });
+    }
+  } catch (err) {
+    console.error('[Cashfree] Exception during order verification:', err);
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// Cashfree Webhook endpoint for async server notifications
+apiRouter.post('/cashfree/webhook', async (req: Request, res: Response) => {
+  try {
+    const event = req.body;
+    console.log('[Cashfree Webhook] Event received:', event?.type || 'payment event');
+    
+    if (event?.data?.order && event.data.payment) {
+      const orderId = event.data.order.order_id;
+      const orderStatus = event.data.order.order_status;
+      const amount = parseFloat(event.data.order.order_amount) || 0;
+
+      if (orderStatus === 'PAID') {
+        const db = getDbPool();
+        const [rows] = await db.query<mysql.RowDataPacket[]>(
+          'SELECT id, status, user_id FROM cashfree_orders WHERE order_id = ?',
+          [orderId]
+        );
+
+        if (rows.length > 0 && rows[0].status !== 'PAID') {
+          const uid = rows[0].user_id;
+          await db.query('UPDATE cashfree_orders SET status = "PAID" WHERE order_id = ?', [orderId]);
+          await db.query('UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?', [amount, uid]);
+          await db.query(`
+            INSERT INTO transactions (user_id, amount, type, status, description, created_at)
+            VALUES (?, ?, 'credit', 'SUCCESS', ?, NOW())
+          `, [uid, amount, `Webhook Cashfree Deposit (${orderId})`]);
+        }
+      }
+    }
+
+    res.json({ status: 'OK' });
+  } catch (err) {
+    console.error('[Cashfree Webhook] Error:', err);
+    res.status(200).json({ status: 'ERROR_RECORDED' });
+  }
+});
+
+// ---------------------------------------------------------------------
+// 6. ONESIGNAL PUSH NOTIFICATIONS
+// ---------------------------------------------------------------------
+apiRouter.post('/notifications/send', async (req: Request, res: Response) => {
+  const { title, message, targetUrl, playerIds, userIds, badgeType } = req.body;
+
+  if (!title || !message) {
+    return res.status(400).json({ success: false, error: 'Title and message are required' });
+  }
+
+  try {
+    const db = getDbPool();
+
+    // 1. Record in app_notifications table
+    await db.query(`
+      INSERT INTO app_notifications (title, message, target_url, badge_type, created_at)
+      VALUES (?, ?, ?, ?, NOW())
+    `, [title, message, targetUrl || '/?tab=home', badgeType || 'SYSTEM']);
+
+    // 2. Dispatch via OneSignal REST API v1
+    const osPayload: any = {
+      app_id: APP_CONFIG.oneSignalAppId,
+      contents: { en: message },
+      headings: { en: title },
+      url: targetUrl || 'https://beastzbattle.com/?tab=home',
+      data: {
+        badge_type: badgeType || 'SYSTEM',
+      },
+    };
+
+    if (Array.isArray(playerIds) && playerIds.length > 0) {
+      osPayload.include_player_ids = playerIds;
+    } else {
+      osPayload.included_segments = ['Subscribed Users'];
+    }
+
+    const osRes = await fetch('https://onesignal.com/api/v1/notifications', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Key ${APP_CONFIG.oneSignalApiKey}`,
+      },
+      body: JSON.stringify(osPayload),
+    });
+
+    const osData = await osRes.json();
+
+    res.json({
+      success: true,
+      message: 'Notification dispatched and stored in database!',
+      oneSignal: osData,
+    });
+  } catch (err) {
+    console.error('[OneSignal] Notification error:', err);
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// Get Notifications List from TiDB
+apiRouter.get('/notifications', async (_req: Request, res: Response) => {
+  try {
+    const db = getDbPool();
+    const [rows] = await db.query<mysql.RowDataPacket[]>(`
+      SELECT id, title, message, target_url, badge_type, created_at 
+      FROM app_notifications 
+      ORDER BY id DESC 
+      LIMIT 30
+    `);
+
+    res.json({
+      success: true,
+      notifications: rows.map((r: any) => ({
+        id: String(r.id),
+        title: r.title,
+        message: r.message,
+        targetUrl: r.target_url,
+        badgeType: r.badge_type || 'SYSTEM',
+        time: new Date(r.created_at).toLocaleString(),
+      })),
+    });
+  } catch (err) {
+    console.error('Error fetching notifications:', err);
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// ---------------------------------------------------------------------
+// 7. SETTINGS & APP CONFIG
+// ---------------------------------------------------------------------
+apiRouter.get('/settings', async (_req: Request, res: Response) => {
+  try {
+    const db = getDbPool();
+    const [rows] = await db.query<mysql.RowDataPacket[]>('SELECT `key`, `value` FROM settings');
+    const settingsMap: Record<string, string> = {};
+    rows.forEach((r: any) => {
+      if (r.key) settingsMap[r.key] = r.value || '';
+    });
+
+    res.json({
+      success: true,
+      settings: settingsMap,
+      config: {
+        appName: settingsMap['app_name'] || 'BEASTz-BATTLE',
+        adminUpiId: settingsMap['admin_upi_id'] || settingsMap['upi_id'] || APP_CONFIG.adminUpiId,
+        supportWhatsapp: settingsMap['whatsapp_no'] || APP_CONFIG.supportWhatsapp,
+        cashfreeEnabled: (settingsMap['cashfree_status'] || 'active') === 'active',
+        cashfreeAppId: APP_CONFIG.cashfreeAppId,
+        cashfreeEnv: APP_CONFIG.cashfreeEnv,
+        oneSignalAppId: APP_CONFIG.oneSignalAppId,
+        apkUrl: settingsMap['apk_download_url'] || '/BEASTz-BATTLE.apk',
+        minDeposit: Number(settingsMap['min_deposit']) || 10,
+        maxDeposit: Number(settingsMap['max_deposit']) || 50000,
+        minWithdrawal: Number(settingsMap['min_withdrawal']) || 50,
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching settings:', err);
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// App Config / Info Legacy compatibility
 apiRouter.get('/config', (_req: Request, res: Response) => {
   res.json({
     success: true,
@@ -490,6 +853,8 @@ apiRouter.get('/config', (_req: Request, res: Response) => {
       oneSignalAppId: APP_CONFIG.oneSignalAppId,
       adminUpiId: APP_CONFIG.adminUpiId,
       supportWhatsapp: APP_CONFIG.supportWhatsapp,
+      cashfreeAppId: APP_CONFIG.cashfreeAppId,
+      cashfreeEnv: APP_CONFIG.cashfreeEnv,
       apkUrl: '/BEASTz-BATTLE.apk',
     }
   });

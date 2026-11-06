@@ -135,7 +135,60 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [transactions]);
 
   const [storeItems] = useState<StoreItem[]>(INITIAL_STORE_ITEMS);
-  const [leaderboard] = useState<LeaderboardUser[]>(INITIAL_LEADERBOARD);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardUser[]>(INITIAL_LEADERBOARD);
+
+  // Sync with live TiDB Cloud Database on mount & intervals
+  useEffect(() => {
+    async function syncBackendData() {
+      try {
+        // 1. Tournaments
+        const tRes = await fetch('/api/tournaments');
+        if (tRes.ok) {
+          const tData = await tRes.json();
+          if (tData.success && Array.isArray(tData.tournaments) && tData.tournaments.length > 0) {
+            setTournaments(tData.tournaments);
+          }
+        }
+
+        // 2. User & Wallet
+        const uRes = await fetch('/api/user');
+        if (uRes.ok) {
+          const uData = await uRes.json();
+          if (uData.success && uData.user) {
+            setUser((prev) => ({
+              ...prev,
+              ...uData.user,
+              currentBalance: Number(uData.user.currentBalance ?? prev.currentBalance),
+            }));
+          }
+        }
+
+        // 3. Transactions
+        const txRes = await fetch('/api/transactions');
+        if (txRes.ok) {
+          const txData = await txRes.json();
+          if (txData.success && Array.isArray(txData.transactions) && txData.transactions.length > 0) {
+            setTransactions(txData.transactions);
+          }
+        }
+
+        // 4. Leaderboard
+        const lbRes = await fetch('/api/leaderboard');
+        if (lbRes.ok) {
+          const lbData = await lbRes.json();
+          if (lbData.success && Array.isArray(lbData.leaderboard) && lbData.leaderboard.length > 0) {
+            setLeaderboard(lbData.leaderboard);
+          }
+        }
+      } catch (e) {
+        console.warn('Backend live sync fallback to local cache:', e);
+      }
+    }
+
+    syncBackendData();
+    const interval = setInterval(syncBackendData, 15000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Modals state
   const [isDepositModalOpen, setIsDepositModalOpen] = useState(false);
@@ -177,6 +230,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const updateUserProfile = (data: Partial<User>) => {
     setUser((prev) => ({ ...prev, ...data }));
     addToast('Profile Updated', 'Your profile details have been successfully saved.', 'success');
+    fetch('/api/user/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: user.id,
+        inGameName: data.ign,
+        gameUid: data.gameUid,
+        phone: data.phone,
+      }),
+    }).catch(console.error);
   };
 
   // Deposit handler
@@ -209,6 +272,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...prev,
       currentBalance: prev.currentBalance + amount,
     }));
+
+    // Sync with TiDB
+    fetch('/api/deposit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: user.id,
+        amount,
+        upiRef: upiRef.trim(),
+        method,
+      }),
+    }).catch(console.error);
 
     try {
       confetti({
@@ -251,6 +326,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...prev,
       currentBalance: prev.currentBalance - amount,
     }));
+
+    // Sync with TiDB
+    fetch('/api/withdraw', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: user.id,
+        amount,
+        upiOrBank,
+        method,
+      }),
+    }).catch(console.error);
 
     addToast(
       'Withdrawal Processed!',
@@ -352,6 +439,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       'success'
     );
     setSelectedTournamentForJoin(null);
+
+    // Sync with TiDB
+    fetch('/api/tournaments/join', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tournamentId,
+        userId: user.id,
+        ign: user.ign,
+        gameUid: user.gameUid,
+      }),
+    }).catch(console.error);
+
     return { success: true };
   };
 
@@ -441,6 +541,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setTournaments((prev) => [created, ...prev]);
     addToast('Tournament Created!', `${created.title} has been published successfully.`, 'success');
+
+    fetch('/api/tournaments/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newTourn),
+    }).catch(console.error);
   };
 
   // Admin: Update room ID & password
@@ -459,6 +565,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
     addToast('Room Details Updated', `Room ID: ${roomId} & Pass shared with registered players.`, 'success');
+
+    fetch('/api/tournaments/update_room', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tournamentId, roomId, roomPass }),
+    }).catch(console.error);
   };
 
   // Admin: Update tournament status
@@ -472,6 +584,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
     addToast('Status Updated', `Tournament status changed to ${status.toUpperCase()}.`, 'info');
+
+    fetch('/api/tournaments/update_status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tournamentId, status }),
+    }).catch(console.error);
   };
 
   // Admin: Approve transaction
@@ -480,6 +598,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       prev.map((tx) => (tx.id === txId ? { ...tx, status: 'completed' } : tx))
     );
     addToast('Transaction Approved', `Transaction ${txId} marked as completed.`, 'success');
+
+    fetch('/api/admin/approve_tx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ txId }),
+    }).catch(console.error);
   };
 
   // Admin: Reject transaction
@@ -488,6 +612,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       prev.map((tx) => (tx.id === txId ? { ...tx, status: 'rejected' } : tx))
     );
     addToast('Transaction Rejected', `Transaction ${txId} was rejected.`, 'info');
+
+    fetch('/api/admin/reject_tx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ txId }),
+    }).catch(console.error);
   };
 
   return (

@@ -16,8 +16,9 @@ export const MatchCard: React.FC<MatchCardProps> = ({ tournament }) => {
   const fillPct = Math.min(100, Math.round((tournament.filledSlots / tournament.totalSlots) * 100));
 
   // Map image based on tournament map
-  const getMapThumbnail = (map: string) => {
-    switch (map.toUpperCase()) {
+  const getMapThumbnail = (map?: string) => {
+    const m = String(map || 'BERMUDA').toUpperCase();
+    switch (m) {
       case 'BERMUDA':
         return 'https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=200&q=80';
       case 'IRON CAGE':
@@ -26,6 +27,8 @@ export const MatchCard: React.FC<MatchCardProps> = ({ tournament }) => {
         return 'https://images.unsplash.com/photo-1550745165-9bc0b252726f?auto=format&fit=crop&w=200&q=80';
       case 'COLOSSEUM':
         return 'https://images.unsplash.com/photo-1538481199705-c710c4e965fc?auto=format&fit=crop&w=200&q=80';
+      case 'ERANGEL':
+        return 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=200&q=80';
       default:
         return 'https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=200&q=80';
     }

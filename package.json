@@ -6,7 +6,6 @@
   "packageManager": "npm@10.8.0",
   "scripts": {
     "dev": "tsx server.ts",
-    "install": "npm install --force",
     "build": "vite build",
     "start": "tsx server.ts",
     "preview": "vite preview",
@@ -34,9 +33,3 @@
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
-    "tailwindcss": "^4.3.3",
-    "tsx": "^4.21.0",
-    "typescript": "^7.0.2",
-    "@types/express": "^4.17.21"
-  }
-}
